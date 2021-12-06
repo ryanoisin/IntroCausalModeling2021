@@ -1,0 +1,419 @@
+---
+title: "Intro to Causal Discovery: Part 2"
+author: "Oisín Ryan"
+mainfont: Arial
+fontsize: 12pt
+urlcolor: blue
+output:
+  html_document:
+    highlight: default
+    theme: paper
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: '5'
+params:
+  rcode: true
+  answers: true
+---
+
+```{r global_options, include=FALSE}
+library(knitr)
+library(png)
+library(pcalg)
+library(qgraph)
+knitr::opts_chunk$set(fig.pos = 'H', message = FALSE, warnings = FALSE)
+```
+
+
+In this part you'll get some hands-on experience using the second two strategies we saw in class: Restricted SCMs and Invariant Causal Prediction/ Again you'll need the packages from the `setup.R` file, specifically we'll need
+
+```{r, eval = F, echo  = TRUE}
+library(dHSIC)
+library(mgcv)
+library(pcalg)
+library(qgraph)
+```
+
+
+# Exercise 1: Restricted SCMs
+
+In the lecture we learned about a strategy for causal discovery which involves restricting the causal model in some way. The basic principle is that, if we assume either a) non-Gaussian additive noise or b) non-linear relationships with additive noise, then we can discover the causal direction of arrows in the DAG. When we have two variables $X$ and $Y$ the basic approach is to fit a regression model in both ``directions'' and then test for independence of the error and the predictor of the model.
+
+Below we will get some practice with applying these techniques to bivariate systems, so called `cause-effect pairs'. We will also see that causal discovery based on linear but non-Gaussian models can be easily scaled up to the multivariate case using the so called *LiNGAM* (Linear Non-Gaussian Acyclic Models) algorithm.
+
+## 1.1: Non-Gaussian Cause-Effect Pairs
+Let's start by reproducing the example given in the lecture slides, where the noise distribution of $Y$ is given by a *uniform* distribution $U(lb, ub)$. In a uniform distribution, all values between the lower bound $lb$  and upper-bound $ub$ are equally likely. For example, a uniform distribution $U(-1,1)$ looks like this (with 1000 samples):
+
+```{r}
+set.seed(1234)
+n <- 5000
+noise <- runif(n,-1,1)
+hist(noise, prob = T)
+```
+
+
+
+
+$\blacktriangleright$ Generate data from the SCM: $Y$ $:=$ $X$ $+$ $\epsilon$  where $X$ and $\epsilon$ are drawn from a uniform distribution, as given above.
+  
+```{r, include = params$rcode, eval = params$answers}
+set.seed(1234)
+n <- 5000
+noise <- runif(n,-1,1)
+X <- runif(n, -1,1)
+Y = X + noise
+```
+
+  
+$\blacktriangleright$ Fit a linear regression model in the correct causal direction ($Y$ predicted by $X$) and the incorrect causal direction ($X$ predicted by $Y$). Save the residuals for each model.
+  
+```{r, include = params$rcode, eval = params$answers, cache = T}
+library(dHSIC)
+myx <- lm(Y~X)
+mxy <-  lm(X~Y)
+
+# save residuals
+myx_r <- myx$residuals
+mxy_r <- mxy$residuals
+
+```
+
+  
+$\blacktriangleright$ Recreate the figures from the lecture. That is, for each model, plot a) the predictor against the outcome variable and b) the predictor variable against the residuals. What do you notice?
+  
+```{r, include = params$rcode, eval = params$answers}
+
+# First, for the "correct" causal model Y = X + epsilon
+par(mfrow=c(1,2))
+plot(X, Y, col = "blue", xlab = "X", ylab = "Y", ylim = c(-2,2), xlim = c(-2,2), lwd = 2)
+abline(myx, col = "red")
+abline(h = 0)
+abline(v = 0)
+
+plot(X,myx$residuals, col = "red", ylab = expression(epsilon[X]))
+abline(h = 0)
+abline(v = 0)
+
+# Second, for the incorrect causal model X = Y + epsilon
+par(mfrow=c(1,2))
+plot(Y, X, col = "blue", xlab = "Y", ylab = "X", ylim = c(-2,2), xlim = c(-2,2), lwd = 2)
+abline(mxy, col = "red")
+abline(h = 0)
+abline(v = 0)
+
+plot(X,mxy$residuals, col = "red", ylab = expression(epsilon[Y]))
+abline(h = 0)
+abline(v = 0)
+```
+  
+  
+$\blacktriangleright$ We now want to try and learn the causal direction from our simulated data. We can this by testing, for each model, whether the predictor variable is independent of the residuals. For this you can use the `dhsic.test` function from the package `dHSIC` that we used in last weeks lab. Do you recover the correct causal direction?
+  
+```{r, include = params$rcode, eval = params$answers, cache = T}
+dhsic.test(X,myx_r,method="gamma")
+dhsic.test(Y,mxy_r,method="gamma")
+```
+```{r, echo = F, include = params$answers}
+cat("We fail to reject the null hypothesis X ind epsilon_y")
+cat("We reject the null hypothesis Y ind epsilon_x")
+cat("Hence, the model where predictor ind error is Y = X + epsilon")
+cat("So, we recover the correct causal direction")
+```
+
+$\blacktriangleright$ Repeat the above process, but now choosing your own distribution for the error. Try first generating data from a distribution and plotting it to understand the distribution. You can try, for example, chi-squared `rchisq`, exponential `rexp` or gamma distributions `rgamma` amongst many others. See the information on `Distributions`  in the stats package for detail, or even start with a normal distribution, and apply some transformations (such as `abs()`) to make it non-normal. What do you find?
+
+## 1.2 Non-Linear Cause-Effect Pairs
+Now let's get some practice working with non-linear SCMs. Let's try and recreate the example shown in the lecture slides. The process you'll take is very similar to what we did in the previous question. This time, let's use Gaussian noise, but have Y be a non-linear function of X. In the lecture we used the causal model
+
+$$
+\begin{align*}
+X &\sim \mathcal{N}(0,1.5^2) \\
+Y &:= sin(X) + \epsilon_Y \quad \quad \epsilon_Y \sim {N}(0,0.2^2)
+\end{align*}
+$$
+
+In the previous exercise we tried to determine causal direction using *linear* regression, but that's obviously not suitable here. We want to put ourselves into the shoes of the naive researcher: Let's imagine we know that either $X \rightarrow Y$ or $X \leftarrow Y$, and we know, whichever is true, the causal relationship will be *non-linear*. But, we don't know exactly what that non-linear function is. So, we want to use a regression method that allows for any kind of non-linear relationship to be modelled.
+
+*Generalized Additive Models* (GAMs) are the perfect tool for this purpose: They allow the outcome variable $Y$ to be any smooth function of the predictor variable(s) $X$. For details see chapter 7.7 of James, Witten, Hastie \& Tibshirani (2018) Introduction to Statistical Learning. For our purposes here it suffices to know that we can fit a GAM to our data using `gam(Y ∼ s(X))` from the package `mgcv`; the residuals can be accessed by `gam(Y ∼ s(X))$residuals`.
+
+
+$\blacktriangleright$ First, generate data from the SCM described above
+  
+
+```{r, include = params$rcode, eval = params$answers}
+set.seed(1234)
+n <- 1000
+
+X <- rnorm(n,0,1.5)
+Y <- sin(X) + rnorm(1000,0,.2)
+```
+
+  
+$\blacktriangleright$ Now, fit a GAM regression model in both the correct causal direction ($Y$ predicted by $X$) and the incorrect causal direction ($X$ predicted by $Y$). Save the residuals
+  
+```{r, include = params$rcode, eval = params$answers, cache = T}
+library(mgcv)
+
+gyx <- mgcv::gam(Y ~ s(X))
+gxy <- mgcv::gam(X ~ s(Y))
+
+# save residuals
+gyx_r <- gyx$residuals
+gxy_r <- gxy$residuals
+
+```
+
+  
+$\blacktriangleright$  Recreate the figures from the lecture. That is, for each model, plot a) the predictor against the outcome variable and b) the predictor variable against the residuals. What do you notice? Tip: First, plot the `gam()` model object itself, which will display the estimated non-linear function. Then plot the data and/or residuals using `points()`. What do you notice?
+  
+```{r, include = params$rcode, eval = params$answers, cache = T}
+gyx <- mgcv::gam(Y ~ s(X))
+gxy <- mgcv::gam(X ~ s(Y))
+
+# save residuals
+gyx_r <- gyx$residuals
+gxy_r <- gxy$residuals
+
+
+par(mfrow=c(1,2))
+
+plot(gyx, rug = F, xlab = "X", ylab = "Y",  se = F, ylim = c(-2,2), xlim = c(-4.5,4.5), col = "red", lwd = 2)
+points(X, Y, col = "blue")
+abline(h = 0)
+abline(v = 0)
+
+plot(X,gyx_r , col = "red", ylab = expression(epsilon[X]))
+abline(h = 0)
+abline(v = 0)
+
+par(mfrow = c(1,2))
+plot(gxy, ylab = "X", xlab = "Y", rug = F, se = F, xlim = c(-2,2), ylim = c(-4.5,4.5), col = "red", lwd = 2)
+points(Y, X, col = "blue")
+abline(h = 0)
+abline(v = 0)
+
+plot(Y,gxy_r, col = "red", ylab = expression(epsilon[Y]))
+abline(h = 0)
+abline(v = 0)
+```
+  
+  
+$\blacktriangleright$ We now want to try and learn the causal direction from our simulated data. We can this by testing, for each model, whether the predictor variable is independent of the residuals. For this you can use the `dhsic.test` function from the package `dHSIC` that we used in last weeks lab. Do you recover the correct causal direction?
+  
+```{r, include = params$rcode, eval = params$answers, cache = T}
+dhsic.test(X,gyx$residuals,method="gamma")
+dhsic.test(Y,gxy$residuals,method="gamma")
+```
+```{r,  include = params$answers}
+# We fail to reject the null hypothesis X \ind epsilon_y
+# We reject the null hypothesis Y \ind epsilon_x
+# Hence, the model where predictor \ind error is Y = X + epsilon
+# So, we recover the correct causal direction
+```
+
+$\blacktriangleright$ Bonus: Repeat the above process, but now choosing your own distribution for the error. For example, try using $X^3$ or $e^X$. Play around with making functions that are "closer" to linear than others!
+  
+  
+## 1.3 LiNGAM - Multivariate Linear Non-Gaussian Models (Bonus)
+The LiNGAM algorithm generalizes discovery of causal direction in linear Non-Gaussian models to the multivariate case. It turns out that, if our causal system is linear, non-Gaussian and acyclic, then there is typically only one DAG that implies independence between all error terms. The LiNGAM method is implemented in the `pcalg` package, function `lingam()`. 
+
+Here we provide you with a simulated dataset which shares the same DAG as the simulated data in Exercise 2.1. In this case, however, the noise distributions are all uniform. 
+
+```{r}
+data2 <- readRDS("data_cd_ex2.RDS")
+```
+
+
+$\blacktriangleright$ Use the `lingam()` function to estimate the DAG structure. What do you notice?
+  
+```{r, include = params$rcode, eval = params$answers}
+lin_fit <- pcalg::lingam(data2)
+adjlin <- as(lin_fit, "amat")
+
+# very hacky way of transforming amat to a numeric matrix
+adjmat2 <- apply(adjlin,c(1,2),isTRUE) + 0
+
+# get a nice layout for the graph
+layout = matrix(c(0,1,-1,0,1,0,0,-1),4,2,byrow = T)
+
+qgraph(adjmat2, layout = layout)
+
+```
+
+```{r, include = params$answers}
+cat("LiNGAM succeeds in finding the data-generating DAG! No equivalence class needed")
+
+```  
+
+## 1.4 Empirical Cause-Effect
+So far we worked only with simulated cause-effect pairs. But researchers at the Unversity of Tuebingen have actually collected a little over 100 empirical datasets of [real-life cause-effect pairs](https://webdav.tuebingen.mpg.de/cause-effect/). In each case the true causal model is (thought to be) known. Some example pairs are (first cause, then effect):
+
+  - Altitude and Temperature
+  - Age and Height
+  - $CO_2$- Emissions and energy use
+  - Employment and Population
+
+The following code downloads the above four datasets from the database
+
+```{r, eval = F}
+url <- 'https://webdav.tuebingen.mpg.de/cause-effect/'
+
+temp <- read.table(paste0(url, 'pair0001.txt'), col.names = c('altitude', 'temperature'))
+age <- read.table(paste0(url, 'pair0022.txt'), col.names = c('age', 'height'))
+co2 <- read.table(paste0(url, 'pair0073.txt'), col.names = c('co2', 'energy'))
+pop <- read.table(paste0(url, 'pair0084.txt'), col.names = c('employment', 'population'))
+```
+
+$\blacktriangleright$ Try to find the causal direction in each of the four example datasets. In each case, try out using the linear non-Gaussian approach (you can use the `lingam()` function or the approach in earlier exercises) as well as the non-linear causal model approach which uses `gam()`. Are there situations where one works better than the other? You can download more examples and check the answers on the database website.
+
+```{r, include = params$rcode, eval = params$answers, cache = T}
+# The basic workflow is the same as in the previous exercises
+# Here I only show one example, for age -> height
+
+url <- 'https://webdav.tuebingen.mpg.de/cause-effect/'
+age <- read.table(paste0(url, 'pair0022.txt'), col.names = c('age', 'height'))
+
+dat <- age
+A <- age[,1]
+B <- age[,2]
+plot(A, B)
+
+# First, use non-linear approach
+gBA <- mgcv::gam(B ~ s(A))
+gAB <- mgcv::gam(A ~ s(B))
+
+# Then, linear non-gaussian
+mBA <- lm(B~A)
+mAB <-  lm(A~B)
+
+# Use tests for non-linear case
+dhsic.test(A,gBA$residuals,method="gamma")$p.value
+dhsic.test(B,gAB$residuals,method="gamma")$p.value
+
+# Tests for linear non-gaussian
+dhsic.test(A,mBA$residuals,method="gamma")$p.value
+dhsic.test(B,mAB$residuals,method="gamma")$p.value
+
+```
+
+```{r, eval = params$answers, echo = F}
+cat("Non-linear method correctly identifies causal direction")
+cat("Gaussian non-linear method rejects both null hypotheses, so is inconclusive (fails)")
+
+```
+
+
+
+
+## Exercise 2: Invariant Causal Prediction
+
+In this last part of the lab you will get some hands on experience using Invariant Causal Prediction (ICP). ICP is different from the techniques we discussed previously in the lab in several ways. 
+
+First, ICP needs data taken from different *environments*. We will focus on the situation where we have both observational data and data from a setting where the causal system is undergoing an intervention or interventions of some kind. Second, ICP aims to recover only *part* of the causal DAG. We decide on a target variable $Y$, and then try to learn what variables are direct causes of $Y$. ICP works by looking for those conditional dependencies (i.e. predictive relationships) that stay the same across environments.
+
+There are some important things to keep in mind when using ICP. It's important to remember that, although we have often discussed interventions that set a variable to a constant value (i.e. $do(X = 1)$), it is possible to define many other types of interventions. For example, we can imagine that instead of forcing everyone to take a single aspirin tablet, we might randomly assign people to take some amount of aspirin according to a certain distribution. We can imagine other interventions which increase the *mean* of a variable, or *how* it reacts to other variables in the system (e.g. encouraging but not forcing everyone to take an aspirin, or to take an aspirin as soon as they feel any pain at all!). The neat thing about ICP is that we don't need to know what variables were intervened on, or what those interventions are. The key thing is, however, that these interventions shouldn't act directly on the target variable $Y$. For example, if we randomly assign $Y$ values, then, in the intervention environment, nothing will predict $Y$ - we will have broken the direct causal links by random assignment.
+
+With this refresher in place, let's take a look at an example. We provide you with data (`data_cd_ex3.RDS`) simulated from a four-variable SCM under two conditions. The first 400 rows are observational data. The last 500 rows come from a setting some interventions are applied to the system. The *environment* (observational or interventional) is denoted by the variable in the fifth column `ExpInd`. The DAG of the SCM is shown below
+
+```{r, echo = F}
+adj <- matrix(
+  c(0,0,0,0,
+    1,0,0,0,
+    1,0,0,0,
+    0,1,1,0), 4,4, byrow = T
+)
+names <- c("X1","X2","Y","X3")
+
+qgraph(t(adj), layout = 
+         matrix(c(0,1,
+                  -1,0,
+                  1,0,
+                  0,-1),4,2,byrow = T),
+       labels = names)
+```
+
+
+```{r}
+icpdata <-  readRDS("data_cd_ex3.RDS")
+```
+
+Take it that we are interested in discovering which variables are *direct causes* of the variable $Y$. 
+
+
+$\blacktriangleright$ Use the `ICP()` function from the package `InvariantCausalPrediction` to try and recover the direct causes of $Y$. You'll need to supply a matrix of possible predictor variables $X$, the outcome variable of interest $Y$ and an indicator variable $ExpInd$. Otherwise, use the default settings. Check what variables show a significant causal effect using the `summary()` of the ICP output. Otherwise, look at the `acceptedSets` and pick out the variable (if any) that appears in all sets of predictors.
+
+```{r, include = params$rcode, eval = params$answers, warning=FALSE}
+library(InvariantCausalPrediction)
+icp_out <- ICP(X = icpdata[,c("X1","X2","X3")], Y = icpdata[,"Y"], ExpInd = icpdata[,"ExpInd"])
+icp_out$acceptedSets
+cat("There are three regression models whose parameters stay the same across environments.  \\
+    The model with X1 predictor, X1 and X2 as predictors, and X1 X2 and X3 as predictors \\
+    From the slides we take the so-called intersection - this just means we look at what \\
+    variable is present in all of these models. That's X1!")
+summary(icp_out)
+```
+```{r, include = params$answers}
+cat("This is just another way of looking at the same output - we think X1 is the cause of Y \\ 
+    We also get an estimate of the strength of that causal relation")
+cat("We correctly recover that X1 is the only direct cause of Y")
+```
+
+$\blacktriangleright$  We can perform a kind of ICP method ourselves using linear regression. Let's not look at all possible regression models like the ICP method does, but instead just look at two: A) the regression of $Y$ on its direct cause $X1$ and B) the regression of $Y$ on its non-cause $X2$. Perform each regression model seperately in each environment, and inspect how the estimated parameters of each change or do not change across environments
+  
+```{r, include = params$rcode}
+icpdata <- as.data.frame(icpdata)
+a1 <- lm(Y ~ X1, data = icpdata, subset = (icpdata[,"ExpInd"]== 1))
+a2 <- lm(Y ~ X1, data = icpdata, subset = (icpdata[,"ExpInd"]== 2))
+
+b1 <- lm(Y ~ X2, data = icpdata, subset = (icpdata[,"ExpInd"]== 1))
+b2 <- lm(Y ~ X2, data = icpdata, subset = (icpdata[,"ExpInd"]== 2))
+```
+```{r, include = params$answers}
+print(a1); print(a2)
+cat("In the correct model, the parameters are very similar")
+
+print(b1); print(b2)
+cat("For the non-causal variable X2, the parameters change quite a bit")
+cat("This is a somewhat extreme example, but this is the basic principle!")
+```
+  
+$\blacktriangleright$ Below I give you the code used to generate the observational and intervention data. Notice what those interventions are - an intervention to change the mean of $X1$ and an intervention to randomly assign values of $X2$. Try to play around with your own interventions and test out what ICP can give you. If one method doesn't work, try another - some of the tests for invariance are more suitable for some types of systems and interventions than others (see the section `test` under `?ICP`)
+
+```{r, eval = F}
+n1 <- 400
+n2 <- 500
+ExpInd <- c(rep(1,n1), rep(2,n2))
+
+set.seed(123)
+# In the observational setting, X1 has a mean of zero
+X1o <- rnorm(n1, 0, 1)
+# In the intervention setting, X1 has a mean of 1
+x1i <- 1 + rnorm(n2,0,1)
+
+X1 <- c(X1o, X1i)
+
+# Y is caused by X1
+Y <- 0.5* X1 +  rnorm(n1 + n2, 0, 1)
+
+# Observational: X2 is caused by X1
+X2o <- 1.5 * X1[1:n1] + rnorm(n1, 0,.5)
+
+# Intervention: X2 is randomly assigned
+X2i <- rnorm(n2,0,.5)
+
+X2 <- c(X2o, X2i)
+
+# X3 is caused by Y and X2
+X3 <- -.4 * Y + .2* X2 + rnorm(n1 + n2,0,.2)
+
+X <- cbind(X1, X2, X3)
+
+icpdata <- cbind(X1,X2,X3,Y,ExpInd)
+
+# ICP(X = icpdata[,c("X1","X2","X3")], Y = icpdata[,"Y"], ExpInd = icpdata[,"ExpInd"])
+```
+  
+

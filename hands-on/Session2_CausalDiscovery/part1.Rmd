@@ -1,0 +1,527 @@
+---
+title: "Intro to Causal Discovery: Part 1"
+author: "Oisín Ryan"
+mainfont: Arial
+fontsize: 12pt
+urlcolor: blue
+output:
+  html_document:
+    highlight: default
+    theme: paper
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: '5'
+params:
+  rcode: true
+  answers: true
+---
+
+```{r global_options, include=FALSE}
+library(knitr)
+library(png)
+library(pcalg)
+library(qgraph)
+knitr::opts_chunk$set(fig.pos = 'H', message = FALSE, warnings = FALSE)
+```
+
+
+In this part you'll get some hands-on experience using the constaint-based causal discovery methods covered in class. We'll focus on the **PC algorithm** because this is the easiest of these class of methods to understand. Note that many related alternative approaches exist, such as FCI (fast causal inference), a hill-climbing score-based approach for searching for causal graphs, and the **KPC algorithm** which uses non-parametric conditional independence testing. An accessible overview is given here:
+
+Glymour, C., Zhang, K., & Spirtes, P. (2019). Review of causal discovery methods based on graphical models. Frontiers in Genetics, 10: 524. https://doi.org/10.3389/fgene.2019.00524
+
+and we provide more recommended reading at the bottom of this document.
+
+While we don't use it in the current practical, the `TETRAD` software, developed by researchers at the Pittsburgh Center for Causal Discovery (https://www.ccd.pitt.edu/), contains a variety of different constraint- and score-based techniques for causal learning: https://github.com/cmu-phil/tetrad
+
+For **Python** users, the `TETRAD` software has been implemented for python in the package `causal-learn`, found here: https://github.com/cmu-phil/causal-learn
+
+In these exercises we will get to understand how the PC algorithm works. In exercise 1 you'll be asked to program your own version of the PC algorithm from the ground up. This involves quite a few steps which will help you understand what's really going on in the PC algorithm, but if you get stuck, we recommend skipping ahead to the rest of the exercises and coming back to it
+<!-- While we recommend doing all exercises, we have marked several exercises as "bonus" - you should prioritise the non-bonus exercises. Below an overview of each exercise and the associated learning goals. -->
+
+<!--   - **2.1** Conditional Independence Methods. In *2.1.1* you will learn about the basic principles behind CI-based causal discovery. Essentially, we start by manually testing all possible independence statements, and then show you how to make this process a little bit more efficient, using the basic principles of the *PC algorithm*. In *2.1.2* we walk you through how to use the PC algorithm directly via the `pcalg` package. In *2.1.3* you practice using `pcalg` on a new example. You will see that we generally can't learn the direction of all causal arrows, but we can be more certain about some parts of the DAG than others (when we have colliders).  -->
+<!--   - **2.2** Restricted SCMs. In *2.2.1* and *2.2.2* you learn about the basic principles of causal discovery using restricted SCMs by going through the process manually. In *2.2.1* you learn how to recreate the example of bivariate linear causal system with a non-Gaussian noise term shown in the lecture. In *2.2.2* you learn how to recreate the example of a bivariate non-linear system shown in the lecture. Both examples use the same basic mechanisms to recover the causal direction: Fitting models in both ``directions'' and testing for independence of error term and predictor. For *2.2.2* you get practice with a method for fitting an exploratory non-linear regression model, but you don't need to understand this fully - we provide you with the main function you need. The rest of the exercises are bonus. In *2.2.3* we introduce an R-function from the pcalg package which can learn a multivariate DAG assuming linear relationships with non-Gaussian error. In *2.2.4* we show you a database of empirical cause-effect pairs, and you can practice learning the causal direction using the methdos introduced in the previous exercises. -->
+<!--   - **2.3** Invariant Causal Prediction. We begin by refreshing the basic idea behind ICP. The only mandatory part is to see how to use the `Invariant Causal Prediction` package and interpret the output. Bonus exercises are a) to perform a small part of the ICP method manually, to understand what's happening there and b) to simulate your own interventions and play around with recovery using the ICP. No answers to this last part are given -->
+
+
+#  Data and R packages
+
+Throughout this practical you will make use of various R-packages. Make sure you have run the new `setup` file to install everything necessary. Note that The first two packages can be installed as standard, but the installation of the packages required for the PC algorithm is a little more involved. You need to download some dependencies using `Bioconductor`, an alternative to CRAN used for bioinformatics packages. The code provided in `setup.R` should get you all set up and ready to go. If it doesn't work, check that you have R version 4.0.0 or higher, and that you have installed and configured [Rtools](https://cran.r-project.org/bin/windows/Rtools/).
+
+You will also make use of a simulated dataset `data_cd_ex1.RDS` with four random variables
+
+```{r, cache  = TRUE}
+data <- readRDS("data_cd_ex1.RDS")
+```
+
+
+# Exercise 1: Do-it-yourself Constraint-Based Causal Discovery
+
+In this exercise you will get some practice with causal discovery through conditional independence testing. In the lecture we discussed that the most basic approach to doing this is to test all possible (marginal and) conditional independence relations present in the data, and then try to draw all corresponding DAGs. In this first exercise we will guide you through how to do this step by step. In the later exercises, you'll try out software for causal discovery that use more sophisticated strategies.
+
+$\blacktriangleright$  Write down all possible conditional and marginal independence relations it is possible to test in this dataset. We have four variables in total, so that means we need to test: a) all marginal dependencies, b) all conditional dependencies where we condition on one other variable, and c) all conditional dependencies where we condition on two other variables. There are *24* in total!
+```{r, include = params$rcode, results = 'hide', cache = TRUE, warnings = FALSE}
+# You don't need R to do this, but for convenience I do the following:
+
+# We have four variables, which means there are 6 marginal relationships to test
+p <- 4
+names <- paste0("X",1:p)
+marginal_string <- t(combn(names,2))
+colnames(marginal_string) <- c("DV1","DV2")
+
+
+# We next list all of the conditional relationships. First, all possible conditional relationships
+# given a single conditioning variable
+# There are 6 x 2 = 12 of these (each bivariate relationship conditioned on each of the other remaining two variables)
+
+cond1_string <- matrix("NA",12,3)
+colnames(cond1_string) <- c("DV1", "DV2","Conditional On")
+cond1_string[seq(1,11,2),c(1,2)] <- cond1_string[seq(2,13,2),c(1,2)]  <- marginal_string
+for(i in seq(1,11,2)){
+  cv <- names[!names %in% cond1_string[i,c(1,2)]]
+  cond1_string[i,3] <- cv[1] ; cond1_string[i+1,3] <- cv[2]
+}
+
+# We also have to consider bivariate relationships conditional on both remaining variables
+# There are six of these
+cond2_string <- cbind(marginal_string,"NA", "NA")
+colnames(cond2_string)[3:4] <- c("Conditional on", "And")
+for(i in 1:6){
+  cv <- names[!names %in% cond2_string[i,c(1,2)]]
+  cond2_string[i,3] <- cv[1] ; cond2_string[i,4] <- cv[2]
+}
+
+```
+```{r, include = params$answers}
+print(marginal_string) 
+print(cond1_string)
+print(cond2_string)
+```
+
+
+$\blacktriangleright$ Assume Gaussian noise and linear relationships. This means that we can use *correlations* to test for marginal independence and *partial correlations* to test for conditional independence. Partial correlations are similar to regression coefficients (in that they express conditional relationships), but a) don't have a direction, and b) like correlations they take on a value between $-1$ and $1$. Test each of these relationships using partial correlations estimated from the data provided (with an alpha level of $.05$). You can use the `ppcor` package for this, for example. The `cor.test` function can be used for calculating correlations and accompanying p-values; the `pcor.test` function is useful when you want to condition on one variable, while `pcor` tests independence between pairs of variables, given all other variables in the dataset.
+
+```{r, include = params$rcode, message = FALSE, warning = FALSE, eval = FALSE}
+# Remember that the null hypothesis for each test is that the two variables are independent.
+# Use an alpha of .05 for each test.
+
+# Test Marginal Independence using
+martest1 <- cor.test(data[,"X1"], data[,"X2"])
+martest1$p.value
+
+# Test Conditional Independence using
+library(ppcor)
+ctest1 <- pcor.test(data[,"X1"], data[,"X2"], data[,"X3"])
+ctest1$p.value
+```
+
+
+```{r, include = params$answers, cache = TRUE}
+alpha <- .05
+
+# First let's test those marginal correlations
+marg_p <- apply(marginal_string,1,function(r){
+  cor.test(data[,r[1]], data[,r[2]])$p.value
+})
+
+library(ppcor)
+# Now test the first set of conditional dependencies
+c1_p <- apply(cond1_string,1,function(r){
+  pcor.test(data[,r[1]], data[,r[2]], data[,r[3]])$p.value
+})
+
+# and the second set of conditional dependencies
+c2_pmat <- pcor(data)$p.value # matrix of p-values for each pair given all other variables
+c2_p <- c2_pmat[lower.tri(c2_pmat)]
+
+# Remember that the null hypothesis for each test is that the two variables are independent
+# So, if p < alpha, we reject the null hypothesis (and infer dependence)
+# if p > alpha we fail to reject the null (and infer independence)
+# Again I make a table to show this - not necessary for you to be to do!
+
+marg <- cbind(marginal_string,ifelse(marg_p < alpha, "Dependent", "Independent"))
+c1 <- cbind(cond1_string,ifelse(c1_p < alpha, "Dependent", "Independent"))
+c2 <- cbind(cond2_string,ifelse(c2_p < alpha, "Dependent", "Independent"))
+marg; c1 ; c2
+
+```
+
+$\blacktriangleright$ List all of the *independencies* that you find. That is, what variables are marginally or conditionally independent of one another and under what conditions?
+
+```{r, include = params$answers, echo = FALSE}
+paste0(c1[7,1], " is Independent of ", c1[7,2], " given ", c1[7,3])
+paste0(c2[3,1], " is Independent of ", c2[3,2], " given {", c2[3,3], " , ", c2[3,4], " }")
+
+
+```
+
+Now we want to use the independence relations we found above to infer the underlying DAG structure, assuming sufficiency and faithfulness. You could of course take a ``brute force'' approach to this by drawing all of the four-variable DAGs that are possible, and ruling out one-by-one those that don't imply those independence relations. But it turns out there is an easier and more efficient way to do this. This method uses two principles. Here's the first:
+
+**Principle 1**:  Two variables $A$ and $B$ are directly connected in the DAG (either $A \rightarrow B$ OR $B \rightarrow A$) if and *only if* they are dependent conditional on **every possible subset** of the other variables
+
+$\blacktriangleright$ Use this first principle to draw the **skeleton** of the DAG. Start by drawing an **undirected** graph where every variable is connected to every other variable. Then, remove edges between variables if they are either marginally or conditionally independent in **any** of the tests in the previous exercise. Tip: Use `qgraph` to make your undirected graph. Undirected graphs have a symmetric adjacency matrix, but you can also use the `directed = FALSE` option.
+
+```{r, include = params$rcode, eval = F, cache = TRUE}
+library(qgraph)
+
+# Adj matrix for a ``full'' undirected graph
+adj_full <- matrix(1,4,4)
+diag(adj_full) <- 0
+
+# make the layout custom (optional)
+layout = matrix(c(0,1,-1,0,1,0,0,-1),4,2,byrow = T)
+
+# Make the ``full'' graph
+qgraph(adj_full, labels = names, layout = layout, directed = FALSE, title = "Full Undirected Graph", title.cex = 1.25, vsize = 15)
+```
+
+```{r, include = params$answers, eval = T}
+# Remove the edges between X2 - X3 and X1- x4
+adj_full <- matrix(1,4,4)
+diag(adj_full) <- 0
+adj <- adj_full
+adj[2,3] <- adj[3,2] <- 0
+adj[1,4] <- adj[4,1] <- 0
+
+# make the layout custom (optional)
+layout = matrix(c(0,1,-1,0,1,0,0,-1),4,2,byrow = T)
+
+par(mfrow=c(1,2))
+qgraph(adj_full, labels = names, layout = layout, directed = FALSE, title = "Full Undirected Graph", title.cex = 1.25, vsize = 15)
+qgraph(adj, labels = names, layout = layout, directed = FALSE, title = "Estimated Skeleton", title.cex = 1.25, vsize = 15)
+```
+
+Having obtained a skeleton, we can now try to give a *direction* to as many edges as possible. Recall from the lecture that our ability to orient the arrows in a DAG using only conditional independence information is reliant on the presence of **collider** structures. This leads us to our second principle for inferring DAG structures:
+
+**Principle 2**: If our skeleton contains a triplet  $A - B - C$, we can orientate the arrows as $A \rightarrow B \leftarrow C$ if and only if $A$ and $C$ are **dependent** conditional on *every set of variables containing* $B$
+
+This is a slightly trickier principle to wrap your head around, but it essentially is just a re-statement of the d-seperation rules for colliders. 
+
+$\blacktriangleright$ Use this second principle to give a direction to as many arrows as possible in the skeleton. What is the resulting CPDAG? Tip: With qgraph, use `bidirectional = TRUE` or see the help for the `directed` argument
+
+```{r, include = params$answers, echo = F}
+text <- "There are four triplets you must consider:  \n A) X2 - X1 - X3  \n B) X1 - X3 - X4  \n C) X1 - X2 - X4  \n D) X2 - X4 - X3"
+cat(text)
+```
+
+```{r, include = params$answers, echo = F}
+cat("We rule out A) because we found above that  \n X2 and X3 are independent given X1")
+cat("We rule out C) and B) because we found that   \n X1 is independent of X4 given {X2 , X3}")
+cat("But X2 and X3 are always dependent (given either X1, X4 or {X1, X4})  \n That means X2 -> X4 <- X3")
+```
+```{r, include = params$answers, cache = TRUE}
+cpdag <- adj
+cpdag[4,2] <- 0 # we know that this arrow goes X2 -> X4
+cpdag[4,3] <- 0 # we know the direction is X3 -> X4
+
+# extra touch - making a mix of directed and undirected edges
+cptf <- matrix(FALSE, 4,4)
+cptf[2,4] <- cptf[3,4] <- TRUE
+
+par(mfrow = c(1,1))
+qgraph(cpdag, labels = names, layout = layout, directed = cptf, title = "Estimated CPDAG", title.cex = 1.25, asize = 8, vsize = 15)
+```
+
+$\blacktriangleright$ Draw all of the DAGs that make up the estimated Markov Equivalence Class. You might find it helpful to do this with pen and paper first before transferring to qgraph.
+
+```{r, include=params$answers}
+dag1 <- matrix(c(
+   0  ,  0  ,  1  ,  0,
+   1  ,  0  ,  0  ,  1,
+   0  ,  0  ,  0  ,  1,
+   0  ,  0  ,  0  ,  0
+), 4, 4, byrow = T)
+
+dag2 <- matrix(c(
+   0  ,  1  ,  0  ,  0,
+   0  ,  0  ,  0  ,  1,
+   1  ,  0  ,  0  ,  1,
+   0  ,  0  ,  0  ,  0
+), 4, 4, byrow = T)
+
+dag3 <- matrix(c(
+   0  ,  1  ,  1  ,  0,
+   0  ,  0  ,  0  ,  1,
+   0  ,  0  ,  0  ,  1,
+   0  ,  0  ,  0  ,  0
+), 4, 4, byrow = T)
+
+par(mfrow = c(1,3))
+qgraph(dag1, labels = names, layout = layout, directed = TRUE, asize = 8, vsize = 15)
+qgraph(dag2, labels = names, layout = layout, directed = TRUE, title = "Estimated Markov Equiv. Class", title.cex = 1.25, asize = 8, vsize = 15)
+qgraph(dag3, labels = names, layout = layout, directed = TRUE, asize = 8, vsize = 15)
+```
+```{r, include = params$answers, echo = F}
+cat("Notice that not all arrow orientations are allowed  \n
+    You cannot create any new collider structures that aren't already in the CPDAG  \n
+    We already ruled those out in the last step!")
+```
+
+The true DAG structure used for data generation is given below. Check that this is included in your estimated Markov Equivalence Class!
+
+```{r, echo = F}
+qgraph(dag3, labels = names, layout = layout, directed = TRUE, asize = 8, vsize = 15,
+       title = "True DAG")
+```
+
+Notice that each of the graphs in the Markov Equivalence class imply the same set of statistically dependencies we would expect to see in observational data. This is one way in which we might say that different causal models are *statistically equivalent*, or to be more precise, **markov equivalent**. However, these DAGs are not *causally equivalent*. 
+
+$\blacktriangleright$ Imagine that we are interested in the effect of the intervention $do(X_1 = 1)$ on the expected value of $X_4$. Estimate the effect of this intervention from the observational data, using each of the DAGs in the Markov Equivalence class in turn to derive how this should be done. What do you notice?
+```{r, include= params$answers, echo = F}
+cat("According to the first DAG, we should adjust for X2")
+```
+```{r, include = params$answers, cache = TRUE}
+m1 <- lm(X4 ~ X1 + X2, data = as.data.frame(data))$coefficients
+E_1 <- m1[1] + m1[2]*1 + m1[3]*mean(data[,"X2"])
+E_1
+```
+```{r, include= params$answers, echo = F}
+cat("According to the second DAG, we should adjust for X3")
+```
+```{r, include = params$answers, cache = TRUE}
+m2 <- lm(X4 ~ X1 + X3, data = as.data.frame(data))$coefficients
+E_2 <- m2[1] + m2[2]*1 + m2[3]*mean(data[,"X3"])
+E_2
+```
+```{r, include= params$answers, echo = F}
+cat("According to the third (true) DAG, we should not adjust for anything")
+```
+```{r, include = params$answers, cache = TRUE}
+m3 <- lm(X4 ~ X1, data = as.data.frame(data))$coefficients
+E_3 <- m3[1] + m3[2]*1
+E_3
+```
+
+```{r, include = params$answers, echo = FALSE}
+cat("Even though each DAG is compatible with the same conditional (in)dependence relations \\
+     They each imply a different effect of the same intervention \\
+     We could find out which DAG is the right one by performing that intervention and comparing our estimates \\
+     But, we won't do that in this lab!")
+```
+
+
+
+Because we simulated this data, we know the true effect of this intervention on the expected value of $X4$ is $1.65$.
+
+
+# Exercise 2: Intro to the PC algorithm
+
+The approach we took in the previous exercise worked, but was actually quite inefficient. Consider again the two principles we used to create first a skeleton and second a CPDAG from conditional independence tests in the previous exercise.
+
+- In order to omit the edge $X2 - X3$ from the skeleton, all we needed to know was that they were independent given $X1$. Remember: If two variables are directly causally dependent $X2 \rightarrow X3$ or $X2 \leftarrow X3$, then they will *never* be statistically independent, no matter what we condition on! So, once we knew that $X2$ and $X3$ were independent given $X1$, there was actually no need to also test whether they were independent given $X4$ or given ${X1, X4}$. Since independence only tells us that we should remove an edge from the skeleton, and we already removed the edge $X2 - X3$, the information given by those last two tests wasn't used to make any decisions about the skeleton, so we never needed to do those tests in the first place.
+
+- Once we have the skeleton, we need to look for potential collider structures by looking at *triplets*  $A - C - B$ where there is no direct edge between $A$ and $B$. If we have such a structure, we then need to test whether $A$ and $C$ are dependent given $C$.
+
+Rather than test all possible conditional independence relations, we could design an algorithm which uses these two insights in order to more efficiently estimate a CPDAG. Luckily, Spirtes, Glymour \& Scheines (2000) already had this insight: This is the exact logic of their **PC algorithm**.
+
+A full description of how the `pcalg` package works can be found [here](https://cran.r-project.org/web/packages/pcalg/vignettes/pcalgDoc.pdf). 
+
+The function `pcalg::pc()` estimates the Markov Equivalence Class (CPDAG) using conditional independence tests as described above (assuming sufficiency and faithfulness). In order to do this, we need to tell the function what conditional independence test should be used thought the `indepTest` argument. `pcalg` comes with three pre-defined independence tests: `gaussCItest` for Gaussian variables, based on partial correlations, as well as `discCItest` and `binCItest` for discrete and binary variables, respectively. We also need to define an appropriate alpha level to be used for these independence tests. Here, let's use the `alpha = .05`. 
+
+Finally, for reasons of computational efficiency, `pc()` doesn't work with *raw data* but instead with a list containing *sufficient statistics* (`suffStat`): A summary of the relevant information from which the conditional independence tests can be calculated. Although this may seem strange in the current context, this helps speed things up when we have very large datasets. For Gaussian variables, the sufficient statistics are a) the correlation matrix and b) the sample size. See the examples under the `pc()` help file (`?pc`) for examples with binary and discrete data.
+
+```{r, cache = TRUE}
+suffStat <- list(C = cor(data), n = nrow(data))
+```
+
+
+Let's put all of this information together and use the PC algorithm with the data we gave you in the last exercise. Use the `pc()` function to estimate a Markov Equivalence Class and plot it.
+
+```{r, eval = params$answers, cache = TRUE}
+pc_fit1 <- pc(suffStat = suffStat, indepTest = gaussCItest,
+p = ncol(data), alpha = 0.01)
+# This is the default plotting method for pcalg - uses Rgraphviz
+plot(pc_fit1, main = "Inferred CPDAG using pcalg")
+
+# You can also extract the adjacency matrix and plot using qgraph
+# Note that you have to transpose the matrix; pcalg writes matrices from column to row
+ # cpdag_mat <- as(pc_fit1,"matrix")
+ # qgraph(t(cpdag_mat), labels = names, layout = layout, directed = cptf, title = "Estimated CPDAG", title.cex = 1.25, asize = 8)
+
+```
+
+The `pc` function provides you with the CPDAG directly (though notice that, in the background, first the skeleton is estimated using `skeleton` and then the collider structures are found as described earlier). This should be the same graph you estimated in the previous exercise.
+
+We can get all of the separate DAGs in the equivalence class using the following code
+
+```{r, eval = params$answers, cache = TRUE}
+# Extract the adjacency matrix of the cpdag from pc_fit1
+cpdag_mat <- as(pc_fit1,"matrix")
+
+# Each row is a DAG adjacency matrix in vector form (by rows)
+res1 <- pdag2allDags(cpdag_mat)
+
+# We can get the adjacency matrix of an individual DAG using
+res1_dags <- list()
+for(i in 1:nrow(res1$dags)){
+  res1_dags[[i]] <- t(matrix(res1$dags[i,],4,4,byrow = TRUE))
+}
+# Notice we have to transpose the adjacency matrix here for qgraph!
+
+# We can plot each of these just as we did above
+par(mfrow = c(1,3))
+for(i in 1:3){
+  qgraph(res1_dags[[i]], labels = names, layout = layout, directed = TRUE, asize = 8, vsize = 15)
+}
+
+```
+
+
+We can use the `ida()` function to estimate the effect of an intervention according to each of the DAGs in the Markov Equivalence set. To do this we need to provide the output of the `pc` function and the covariance matrix of the data. So, to find the average causal effect of $X_1$ on $X_4$ (that is, the contrast between $E[Y | do(X = 1)]$ and $E[Y | do(X = 0)]$) we would use the code
+
+```{r, eval = params$answers, cache = TRUE}
+ida(1,4,cov(data), pc_fit1@graph, verbose = TRUE)
+```
+
+This output gives us three numbers, each corresponding to an estimate of the effect of this intervention in one of the three DAGs in the Markov Equivalence set. By specifying `verbose = TRUE` we can see what regressions each number comes from. Compare this to the results you obtained from manually calculating this in the previous exercise - you should see you get *approximately* the same results. Differences come from the fact that we use raw data above, and only summary statistics here. (Note that the order of the effects does not necessarily correspond to the order in which the DAGs are plotted above!)
+
+# Exercise 3: PC algorithm in action
+
+Now that you've seen how the `pcalg` package works, let's try it out on a new example. Suppose that you know the true DAG is given by the following graph
+
+```{r, echo = params$answers}
+names <- LETTERS[1:4]
+adjmat2 <- matrix(c(0,0,1,0,
+                   0,0,1,0,
+                   0,0,0,0,
+                   0,1,1,0),4,4,byrow = TRUE)
+lay2 <- matrix(c(-1,1,
+                 .5,1,
+                  0,0,
+                  1,0),4,2,byrow = TRUE)
+qgraph(adjmat2, labels = names, layout = lay2, directed = TRUE, asize = 8, vsize = 15)
+
+```
+
+$\blacktriangleright$ What do you expect the PC algorithm to be able to recover? What is the CPDAG for this DAG?
+ 
+```{r, include= params$answers}
+# You can work this out by hand, or ``cheat'' by using the pcalg package
+adjmat2 <- matrix(c(0,0,1,0,
+                   0,0,1,0,
+                   0,0,0,0,
+                   0,1,1,0),4,4,byrow = TRUE)
+colnames(adjmat2) <- rownames(adjmat2) <- names
+g2 <- as(adjmat2,"graphNEL") # convert to graphNEL object for pcalg
+# This function converts a DAG to a CPDAG
+cpdag2 <- dag2cpdag(g2)
+plot(cpdag2)
+
+```
+
+Suppose that we have the following data, generated according to the above DAG
+
+```{r}
+set.seed(1234)
+n <- 3000
+
+A <- rnorm(n)
+D <- rnorm(n)
+B <- 0.50 * D + rnorm(n)
+C <- -0.75 * A + B + D +  rnorm(n)
+
+data2 <- cbind(A, B, C, D)
+```
+
+
+$\blacktriangleright$ Use the `pcalg` package to estimate the CPDAG. Do you obtain the correct CPDAG?
+```{r, include = params$rcode, eval = params$answers}
+suffStat2 <- list(C = cor(data2), n = nrow(data2))
+pc_fit2 <- pc(suffStat = suffStat2, indepTest = gaussCItest,
+p = ncol(data), alpha = 0.01)
+# This is the default plotting method for pcalg - uses Rgraphviz
+plot(pc_fit2, main = "Inferred CPDAG using pcalg")
+```
+
+ 
+ 
+$\blacktriangleright$  Estimate the effect on $C$ of an intervention to increase $A$ by one unit
+
+$\blacktriangleright$  Estimate the effect on $C$ of an intervention to increase $D$ by one unit
+        
+        
+```{r, include = params$rcode, eval = params$answers, cache = TRUE}
+# Part 1: Effect of do(A) on C
+ida(1,3,cov(data2), pc_fit2@graph, verbose = TRUE)
+# Part 2: Effect of do(D) on C
+ida(4,3,cov(data2), pc_fit2@graph, verbose = TRUE)
+```
+```{r, include = params$answers, eval = params$answers, echo = FALSE}
+cat("Just as we saw in the previous answer, we are typically uncertain about the effect of interventions \\
+    because we are uncertain about the causal structure! \\
+    Here however, we see the power of identifying collider structures. In this case we have identified \\
+    that A -> C, so we only get a single estimate for the effect of an intervention on A \\
+    However, we are not certain whether D has only a direct effect or also an indirect effect on A \\
+    Because we don't know whether B -> D or D -> B. So, we get two different estimates of the intervention effect!")
+```
+
+# Exercise 4: Extensions of the PC algorithm (Bonus)
+In the previous exercises we have relied on conditional independence testing based on parametric assumptions: we used partial correlations between variables, which assumes that variables have linear relations with additive Gaussian noise. In the last 10 years or so however, new methods have been proposed for conditional independence testing which do not require these assumptions. We used these in the previous lab when using the package `CondIndTests`. 
+
+A popular method which has been used in the causal discovery literature is based on a `kernel` conditional independence test (for details see Zhang, Peters, Janzig \& Scholkopf, 2012, *Kernel-based conditional independence test and application in causal discovery*). Zhang and colleagues implemented an extension of the PC algorithm which uses this `KCI` to test for independence, in the R package `kpcalg`.
+
+In this exercise we will recreate the example empirical analysis of Zhang et al. First, load the `kpcalg` package and the associated dataset
+
+```{r}
+housing <- read.table("housing.data")
+colnames(housing) <- c("CRIM","ZN","INDUS","CHAS","NOX","RM","AGE","DIS","RAD","TAX",
+                        "PTRATIO","B","LSTAT","MEDV")
+```
+
+The dataset consists of 506 observations, concerning housing prices and related variables in suburbs of Boston in 1978. The variable names and descriptions from the original documentation are given below:
+
+    1. CRIM      per capita crime rate by town
+    2. ZN        proportion of residential land zoned for lots over 
+                 25,000 sq.ft.
+    3. INDUS     proportion of non-retail business acres per town
+    4. CHAS      Charles River dummy variable (= 1 if tract bounds 
+                 river; 0 otherwise)
+    5. NOX       nitric oxides concentration (parts per 10 million)
+    6. RM        average number of rooms per dwelling
+    7. AGE       proportion of owner-occupied units built prior to 1940
+    8. DIS       weighted distances to five Boston employment centres
+    9. RAD       index of accessibility to radial highways
+    10. TAX      full-value property-tax rate per $10,000
+    11. PTRATIO  pupil-teacher ratio by town
+    12. B        1000(Bk - 0.63)^2 where Bk is the proportion of black people
+                 by town
+    13. LSTAT    % lower status of the population
+    14. MEDV     Median value of owner-occupied homes in $1000's
+
+To recreate the analysis of Zhang et al., we select a subset of these variables and feed this to the `kpc()` function
+
+```{r cache = TRUE}
+library(kpcalg)
+housingsel <- housing[,c("RM", "MEDV","CRIM","LSTAT","DIS","AGE","NOX","TAX","B","INDUS")]
+kpc_out <- kpcalg::kpc(suffStat = list(data = housingsel, ic.method = "dcc.perm"),
+                       indepTest = kernelCItest,
+                       labels = colnames(housingsel), alpha = 0.05)
+plot(kpc_out)
+```
+
+
+# 3. Recommended Readings
+
+
+Glymour, C., Zhang, K., & Spirtes, P. (2019). Review of causal discovery methods based on graphical models. Frontiers in Genetics, 10: 524. https://doi.org/10.3389/fgene.2019.00524
+
+This paper covers two of the topics we considered in the lecture: 1) conditional-independence based methods (called constraint-based and score-based methods in the paper) and 2) restricted SCMS (called Functional Causal Models in the paper). It does not cover Invariant Causal Prediction (ICP) methods. Furthermore, the algorithms described in sections 3.2 and 3.3 of the paper are not covered this week but may be interesting to read in any case (essentially just alternative ways to pursue conditional-independence based causal discovery). 
+
+You may also find the documentation of the PC algorithm package (link in exercise 2.1.2) helpful in understanding what the PC algorithm is doing and why.
+
+Invariant Causal Prediction is a relatively new technique, and so, tutorial-style papers are somewhat lacking. The paper introducing this technique is given below, but may be too technical to follow for many students. Again, only the basic idea of how this works is necessary to understand (and not, for instance, details like we look for the intersection of sets of variables). Below we also provide a youtube link to a talk by Jonas Peters (the developer of ICP) which may be easier to follow, but again, can be considered as extra non-mandatory material.
+
+Peters, J., Bühlmann, P., & Meinshausen, N. (2016). Causal inference by using invariant prediction: identification and confidence intervals. Journal of the Royal Statistical Society. Series B (Statistical Methodology), 947-1012.
+
+www.youtube.com/watch?v=ijB2odErYLI&ab_channel=CenterforCausalDiscovery
+
+A more complete reference is the excellent book **Elements of Causal Learning** by Scholkopf, Danzig and Peters, available for free online.
+
+Note that the terms causal discovery and causal learning can be used interchangeably!
+
+
+
+
+

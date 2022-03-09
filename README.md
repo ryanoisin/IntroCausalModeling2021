@@ -1,5 +1,5 @@
 # Introduction to Causal Modeling
-A repository for the workshop "Introduction to Causal Modeling".  This workshop was originally given as a Digital Health Masterclass for data science professionals at the University Medical Centre Utrecht in Nov-Dec 2021.
+A repository for the workshop "Introduction to Causal Modeling".  This workshop was originally given as a Digital Health Masterclass for data science professionals at the University Medical Centre Utrecht in Nov-Dec 2021. All materials were prepared by Oisín Ryan.
 
 The workshop consists of `lecture` and `hands-on` parts. Participants are asked to run `setup.R` **before the start of the workshop** in order to install all of the packages which will be used in the hands-on part.
 
